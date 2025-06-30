@@ -1,425 +1,471 @@
-// fn main() {
-//     println!("Hello, superdev!");
-// }
-
-
-// use std::io;
-
-// use rand::Rng;
-
-// fn main() {
-//     println!("Guess the number!");
-
-//     let secret_number = rand::thread_rng().gen_range(1..=100);
-
-//     println!("The secret number is: {secret_number}");
-
-//     println!("Please input your guess.");
-
-//     let mut guess = String::new();
-
-//     io::stdin()
-//         .read_line(&mut guess)
-//         .expect("Failed to read line");
-
-//     println!("You guessed: {guess}");
-// }
-
-
 use axum::{
-    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post, put},
+    routing::post,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
-    commitment_config::CommitmentConfig,
+    instruction::AccountMeta,
     pubkey::Pubkey,
-    signature::{Keypair},
+    signature::{Keypair, Signature},
     signer::Signer,
     system_instruction,
-    transaction::Transaction,
 };
-use std::{collections::HashMap, str::FromStr, sync::Arc};
-use tokio::sync::RwLock;
+use spl_token::instruction::{initialize_mint, mint_to, transfer};
+use std::str::FromStr;
 use tower_http::cors::CorsLayer;
-use anyhow::Error as AnyhowError;
-use utoipa::{OpenApi, IntoParams};
+use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
+use base64::Engine;
 
 // OpenAPI documentation
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        health_check,
-        create_record,
-        get_record,
-        get_all_records,
-        update_record,
-        delete_record
+        generate_keypair,
+        create_token,
+        mint_token,
+        sign_message,
+        verify_message,
+        send_sol,
+        send_token
     ),
-    components(
-        schemas(
-            HealthResponse,
-            RecordResponse,
-            RecordListResponse,
-            DeleteResponse,
-            SolanaRecord,
-            CreateRecordRequest,
-            UpdateRecordRequest,
-            QueryParams
-        )
-    ),
-    tags(
-        (name = "Solana Records API", description = "Solana blockchain record management endpoints")
-    )
+    components(schemas(
+        KeypairResponse,
+        CreateTokenRequest,
+        MintTokenRequest,
+        SignMessageRequest,
+        VerifyMessageRequest,
+        SendSolRequest,
+        SendTokenRequest,
+        InstructionResponse,
+        AccountInfo,
+        SignatureResponse,
+        VerificationResponse
+    )),
+    tags((name = "Solana API", description = "Solana blockchain operations"))
 )]
 struct ApiDoc;
 
-// Application state
+// Response structures
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiResponse<T> {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeypairResponse {
+    pub pubkey: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstructionResponse {
+    pub program_id: String,
+    pub accounts: Vec<AccountInfo>,
+    pub instruction_data: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccountInfo {
+    pub pubkey: String,
+    pub is_signer: bool,
+    pub is_writable: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SignatureResponse {
+    pub signature: String,
+    pub public_key: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerificationResponse {
+    pub valid: bool,
+    pub message: String,
+    pub pubkey: String,
+}
+
+// Request structures
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateTokenRequest {
+    #[serde(rename = "mintAuthority")]
+    pub mint_authority: String,
+    pub mint: String,
+    pub decimals: u8,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MintTokenRequest {
+    pub mint: String,
+    pub destination: String,
+    pub authority: String,
+    pub amount: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SignMessageRequest {
+    pub message: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyMessageRequest {
+    pub message: String,
+    pub signature: String,
+    pub pubkey: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SendSolRequest {
+    pub from: String,
+    pub to: String,
+    pub lamports: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SendTokenRequest {
+    pub destination: String,
+    pub mint: String,
+    pub owner: String,
+    pub amount: u64,
+}
+
+// Application state (minimal for this implementation)
 #[derive(Clone)]
-pub struct AppState {
-    solana_client: Arc<RpcClient>,
-    keypair: Arc<Keypair>,
-    // In-memory cache for faster reads (in production, use Redis or similar)
-    cache: Arc<RwLock<HashMap<String, SolanaRecord>>>,
-}
+pub struct AppState;
 
-// Data structures
-#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
-pub struct SolanaRecord {
-    pub id: String,
-    pub data: String,
-    pub pubkey: Option<String>,
-    pub signature: Option<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct CreateRecordRequest {
-    pub data: String,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct UpdateRecordRequest {
-    pub data: String,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[derive(IntoParams)]
-pub struct QueryParams {
-    /// Maximum number of records to return
-    #[param(example = 10)]
-    pub limit: Option<usize>,
-    /// Number of records to skip
-    #[param(example = 0)]
-    pub offset: Option<usize>,
-}
-
-// Specific response types for OpenAPI documentation
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct HealthResponse {
-    pub success: bool,
-    pub data: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RecordResponse {
-    pub success: bool,
-    pub data: Option<SolanaRecord>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RecordListResponse {
-    pub success: bool,
-    pub data: Option<Vec<SolanaRecord>>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct DeleteResponse {
-    pub success: bool,
-    pub data: Option<String>,
-    pub message: String,
-}
-
-// Solana blockchain operations
 impl AppState {
-    pub fn new(rpc_url: &str, keypair: Keypair) -> Self {
-        let client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-        Self {
-            solana_client: Arc::new(client),
-            keypair: Arc::new(keypair),
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    // Store data on Solana (simplified - in practice you'd use a program)
-    async fn store_on_solana(&self, data: &str) -> Result<(String, String), AnyhowError> {
-        // Create a new account to store data
-        let new_account = Keypair::new();
-        let data_bytes = data.as_bytes();
-        
-        // Calculate minimum balance for rent exemption
-        let rent = self.solana_client
-            .get_minimum_balance_for_rent_exemption(data_bytes.len())?;
-
-        // Create account instruction
-        let create_account_ix = system_instruction::create_account(
-            &self.keypair.pubkey(),
-            &new_account.pubkey(),
-            rent,
-            data_bytes.len() as u64,
-            &solana_sdk::system_program::id(),
-        );
-
-        // Create and send transaction
-        let recent_blockhash = self.solana_client.get_latest_blockhash()?;
-        let transaction = Transaction::new_signed_with_payer(
-            &[create_account_ix],
-            Some(&self.keypair.pubkey()),
-            &[&*self.keypair, &new_account],
-            recent_blockhash,
-        );
-
-        let signature = self.solana_client
-            .send_and_confirm_transaction(&transaction)?;
-
-        Ok((new_account.pubkey().to_string(), signature.to_string()))
-    }
-
-    // Fetch account data from Solana
-    async fn fetch_from_solana(&self, pubkey_str: &str) -> Result<Vec<u8>, AnyhowError> {
-        let pubkey = Pubkey::from_str(pubkey_str)?;
-        let account = self.solana_client.get_account(&pubkey)?;
-        Ok(account.data)
-    }
-
-    // Update data on Solana (simplified - would need program support)
-    async fn update_on_solana(&self, _pubkey_str: &str, _new_data: &str) -> Result<String, AnyhowError> {
-        // Note: Direct account data updates require a program
-        // This is a placeholder - in practice you'd call your program
-        Err(AnyhowError::msg("Direct updates require a Solana program"))
+    pub fn new() -> Self {
+        Self
     }
 }
 
-// API Handlers with OpenAPI documentation
-/// Check the health of the service
-#[utoipa::path(
-    get,
-    path = "/health",
-    tag = "Solana Records API",
-    responses(
-        (status = 200, description = "Service health status", body = HealthResponse)
-    )
-)]
-#[axum::debug_handler]
-async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    match state.solana_client.get_health() {
-        Ok(_) => Json(HealthResponse {
-            success: true,
-            data: Some("Solana connection healthy".to_string()),
-            message: "Service is healthy".to_string(),
-        }),
-        Err(e) => Json(HealthResponse {
-            success: false,
-            data: None,
-            message: format!("Solana connection error: {}", e),
-        }),
+// Utility functions
+fn keypair_from_secret(secret: &str) -> Result<Keypair, String> {
+    let secret_bytes = bs58::decode(secret)
+        .into_vec()
+        .map_err(|_| "Invalid base58 secret key")?;
+    
+    if secret_bytes.len() != 64 {
+        return Err("Invalid secret key length".to_string());
+    }
+    
+    Keypair::from_bytes(&secret_bytes)
+        .map_err(|_| "Invalid secret key format".to_string())
+}
+
+fn pubkey_from_str(pubkey_str: &str) -> Result<Pubkey, String> {
+    Pubkey::from_str(pubkey_str)
+        .map_err(|_| "Invalid public key format".to_string())
+}
+
+fn account_meta_to_info(account: &AccountMeta) -> AccountInfo {
+    AccountInfo {
+        pubkey: account.pubkey.to_string(),
+        is_signer: account.is_signer,
+        is_writable: account.is_writable,
     }
 }
 
-/// Create a new record
+// Endpoint handlers
 #[utoipa::path(
     post,
-    path = "/records",
-    tag = "Solana Records API",
-    request_body = CreateRecordRequest,
+    path = "/keypair",
     responses(
-        (status = 200, description = "Record created successfully", body = RecordResponse),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Keypair generated successfully", body = ApiResponse<KeypairResponse>)
     )
 )]
-#[axum::debug_handler]
-async fn create_record(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateRecordRequest>,
-) -> Result<Json<RecordResponse>, StatusCode> {
-    let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    match state.store_on_solana(&payload.data).await {
-        Ok((pubkey, signature)) => {
-            let record = SolanaRecord {
-                id: id.clone(),
-                data: payload.data,
-                pubkey: Some(pubkey),
-                signature: Some(signature),
-                created_at: timestamp,
-                updated_at: timestamp,
-            };
-
-            state.cache.write().await.insert(id.clone(), record.clone());
-
-            Ok(Json(RecordResponse {
-                success: true,
-                data: Some(record),
-                message: "Record created successfully".to_string(),
-            }))
-        }
-        Err(e) => {
-            eprintln!("Error creating record: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
+async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
+    let keypair = Keypair::new();
+    let response = KeypairResponse {
+        pubkey: keypair.pubkey().to_string(),
+        secret: bs58::encode(keypair.to_bytes()).into_string(),
+    };
+    
+    Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    })
 }
 
-/// Get a specific record by ID
 #[utoipa::path(
-    get,
-    path = "/records/{id}",
-    tag = "Solana Records API",
-    params(
-        ("id" = String, Path, description = "Record identifier")
-    ),
+    post,
+    path = "/token/create",
+    request_body = CreateTokenRequest,
     responses(
-        (status = 200, description = "Record found", body = RecordResponse),
-        (status = 404, description = "Record not found")
+        (status = 200, description = "Token creation instruction", body = ApiResponse<InstructionResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
     )
 )]
-#[axum::debug_handler]
-async fn get_record(
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-) -> Result<Json<RecordResponse>, StatusCode> {
-    if let Some(record) = state.cache.read().await.get(&id) {
-        return Ok(Json(RecordResponse {
-            success: true,
-            data: Some(record.clone()),
-            message: "Record found in cache".to_string(),
-        }));
-    }
-    Err(StatusCode::NOT_FOUND)
-}
+async fn create_token(
+    Json(payload): Json<CreateTokenRequest>,
+) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
+    let mint_authority = pubkey_from_str(&payload.mint_authority)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mint = pubkey_from_str(&payload.mint)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-/// Get all records with pagination
-#[utoipa::path(
-    get,
-    path = "/records",
-    tag = "Solana Records API",
-    params(
-        QueryParams
-    ),
-    responses(
-        (status = 200, description = "List of records", body = RecordListResponse)
-    )
-)]
-#[axum::debug_handler]
-async fn get_all_records(
-    Query(params): Query<QueryParams>,
-    State(state): State<AppState>,
-) -> Result<Json<RecordListResponse>, StatusCode> {
-    let limit = params.limit.unwrap_or(10);
-    let offset = params.offset.unwrap_or(0);
-    
-    let records = state.cache.read().await.values().cloned().collect::<Vec<_>>();
-    let total = records.len();
-    
-    let paginated: Vec<SolanaRecord> = records
-        .into_iter()
-        .skip(offset)
-        .take(limit)
+    let instruction = initialize_mint(
+        &spl_token::id(),
+        &mint,
+        &mint_authority,
+        Some(&mint_authority),
+        payload.decimals,
+    ).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let accounts: Vec<AccountInfo> = instruction.accounts
+        .iter()
+        .map(account_meta_to_info)
         .collect();
 
-    let len = paginated.len();
-    
-    Ok(Json(RecordListResponse {
+    let response = InstructionResponse {
+        program_id: instruction.program_id.to_string(),
+        accounts,
+        instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
+    };
+
+    Ok(Json(ApiResponse {
         success: true,
-        data: Some(paginated),
-        message: format!("Retrieved {} records (total: {})", len, total),
+        data: Some(response),
+        error: None,
     }))
 }
 
-/// Update a record
 #[utoipa::path(
-    put,
-    path = "/records/{id}",
-    tag = "Solana Records API",
-    params(
-        ("id" = String, Path, description = "Record identifier")
-    ),
-    request_body = UpdateRecordRequest,
+    post,
+    path = "/token/mint",
+    request_body = MintTokenRequest,
     responses(
-        (status = 200, description = "Record updated successfully", body = RecordResponse),
-        (status = 404, description = "Record not found"),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Token mint instruction", body = ApiResponse<InstructionResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
     )
 )]
-#[axum::debug_handler]
-async fn update_record(
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-    Json(payload): Json<UpdateRecordRequest>,
-) -> Result<Json<RecordResponse>, StatusCode> {
-    let mut cache = state.cache.write().await;
-    
-    if let Some(mut record) = cache.get(&id).cloned() {
-        record.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+async fn mint_token(
+    Json(payload): Json<MintTokenRequest>,
+) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
+    let mint = pubkey_from_str(&payload.mint)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let destination = pubkey_from_str(&payload.destination)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let authority = pubkey_from_str(&payload.authority)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        record.data = payload.data;
-        cache.insert(id, record.clone());
+    let instruction = mint_to(
+        &spl_token::id(),
+        &mint,
+        &destination,
+        &authority,
+        &[],
+        payload.amount,
+    ).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        Ok(Json(RecordResponse {
-            success: true,
-            data: Some(record),
-            message: "Record updated successfully".to_string(),
-        }))
-    } else {
-        Err(StatusCode::NOT_FOUND)
+    let accounts: Vec<AccountInfo> = instruction.accounts
+        .iter()
+        .map(account_meta_to_info)
+        .collect();
+
+    let response = InstructionResponse {
+        program_id: instruction.program_id.to_string(),
+        accounts,
+        instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
+    };
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/message/sign",
+    request_body = SignMessageRequest,
+    responses(
+        (status = 200, description = "Message signed successfully", body = ApiResponse<SignatureResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+    )
+)]
+async fn sign_message(
+    Json(payload): Json<SignMessageRequest>,
+) -> Json<ApiResponse<SignatureResponse>> {
+    match keypair_from_secret(&payload.secret) {
+        Ok(keypair) => {
+            let message_bytes = payload.message.as_bytes();
+            let signature = keypair.sign_message(message_bytes);
+            
+            let response = SignatureResponse {
+                signature: base64::engine::general_purpose::STANDARD.encode(signature.as_ref()),
+                public_key: keypair.pubkey().to_string(),
+                message: payload.message,
+            };
+            
+            Json(ApiResponse {
+                success: true,
+                data: Some(response),
+                error: None,
+            })
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })
     }
 }
 
-/// Delete a record
 #[utoipa::path(
-    delete,
-    path = "/records/{id}",
-    tag = "Solana Records API",
-    params(
-        ("id" = String, Path, description = "Record identifier")
-    ),
+    post,
+    path = "/message/verify",
+    request_body = VerifyMessageRequest,
     responses(
-        (status = 200, description = "Record deleted successfully", body = DeleteResponse),
-        (status = 404, description = "Record not found")
+        (status = 200, description = "Message verification result", body = ApiResponse<VerificationResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
     )
 )]
-#[axum::debug_handler]
-async fn delete_record(
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-) -> Result<Json<DeleteResponse>, StatusCode> {
-    let mut cache = state.cache.write().await;
+async fn verify_message(
+    Json(payload): Json<VerifyMessageRequest>,
+) -> Json<ApiResponse<VerificationResponse>> {
+    let result = (|| -> Result<bool, String> {
+        let pubkey = pubkey_from_str(&payload.pubkey)?;
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&payload.signature)
+            .map_err(|_| "Invalid signature format")?;
+        
+        if signature_bytes.len() != 64 {
+            return Err("Invalid signature length".to_string());
+        }
+        
+        let signature = Signature::from(<[u8; 64]>::try_from(signature_bytes)
+            .map_err(|_| "Invalid signature format")?);
+        
+        let message_bytes = payload.message.as_bytes();
+        Ok(signature.verify(&pubkey.to_bytes(), message_bytes))
+    })();
     
-    if cache.remove(&id).is_some() {
-        Ok(Json(DeleteResponse {
-            success: true,
-            data: Some(id),
-            message: "Record deleted successfully".to_string(),
-        }))
-    } else {
-        Err(StatusCode::NOT_FOUND)
+    match result {
+        Ok(valid) => {
+            let response = VerificationResponse {
+                valid,
+                message: payload.message,
+                pubkey: payload.pubkey,
+            };
+            
+            Json(ApiResponse {
+                success: true,
+                data: Some(response),
+                error: None,
+            })
+        }
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/send/sol",
+    request_body = SendSolRequest,
+    responses(
+        (status = 200, description = "SOL transfer instruction", body = ApiResponse<InstructionResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+    )
+)]
+async fn send_sol(
+    Json(payload): Json<SendSolRequest>,
+) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
+    let from = pubkey_from_str(&payload.from)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let to = pubkey_from_str(&payload.to)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if payload.lamports == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let instruction = system_instruction::transfer(&from, &to, payload.lamports);
+
+    let accounts: Vec<AccountInfo> = instruction.accounts
+        .iter()
+        .map(account_meta_to_info)
+        .collect();
+
+    let response = InstructionResponse {
+        program_id: instruction.program_id.to_string(),
+        accounts,
+        instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
+    };
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/send/token",
+    request_body = SendTokenRequest,
+    responses(
+        (status = 200, description = "Token transfer instruction", body = ApiResponse<InstructionResponse>),
+        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+    )
+)]
+async fn send_token(
+    Json(payload): Json<SendTokenRequest>,
+) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
+    let mint = pubkey_from_str(&payload.mint)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let owner = pubkey_from_str(&payload.owner)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let destination = pubkey_from_str(&payload.destination)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if payload.amount == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Get associated token accounts
+    let source_ata = spl_associated_token_account::get_associated_token_address(&owner, &mint);
+    let dest_ata = spl_associated_token_account::get_associated_token_address(&destination, &mint);
+
+    let instruction = transfer(
+        &spl_token::id(),
+        &source_ata,
+        &dest_ata,
+        &owner,
+        &[],
+        payload.amount,
+    ).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let accounts: Vec<AccountInfo> = instruction.accounts
+        .iter()
+        .map(account_meta_to_info)
+        .collect();
+
+    let response = InstructionResponse {
+        program_id: instruction.program_id.to_string(),
+        accounts,
+        instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
+    };
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(response),
+        error: None,
+    }))
 }
 
 #[tokio::main]
@@ -430,10 +476,6 @@ async fn main() {
     // Load .env file if it exists
     dotenv::dotenv().ok();
     
-    // Initialize Solana client and keypair
-    let rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
-    
     // Get port from environment variable or use default
     let port = std::env::var("PORT")
         .ok()
@@ -442,48 +484,23 @@ async fn main() {
     
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     
-    // Initialize keypair from private key or generate new one
-    let keypair = match std::env::var("SOLANA_PRIVATE_KEY") {
-        Ok(private_key_base58) => {
-            let private_key_bytes = bs58::decode(private_key_base58)
-                .into_vec()
-                .expect("Failed to decode private key");
-            
-            if private_key_bytes.len() != 64 {
-                log::error!("Invalid private key length. Expected 64 bytes.");
-                std::process::exit(1);
-            }
-            
-            let keypair = Keypair::from_bytes(&private_key_bytes)
-                .expect("Failed to create keypair from private key");
-            
-            log::info!("Successfully loaded wallet from private key");
-            keypair
-        }
-        Err(_) => {
-            log::warn!("No SOLANA_PRIVATE_KEY provided, generating new keypair");
-            Keypair::new()
-        }
-    };
-    
-    log::info!("Server wallet public key: {}", keypair.pubkey());
-    
-    let app_state = AppState::new(&rpc_url, keypair);
+    let app_state = AppState::new();
 
     // Build the router with Swagger UI
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .route("/health", get(health_check))
-        .route("/records", post(create_record))
-        .route("/records", get(get_all_records))
-        .route("/records/:id", get(get_record))
-        .route("/records/:id", put(update_record))
-        .route("/records/:id", delete(delete_record))
+        .route("/keypair", post(generate_keypair))
+        .route("/token/create", post(create_token))
+        .route("/token/mint", post(mint_token))
+        .route("/message/sign", post(sign_message))
+        .route("/message/verify", post(verify_message))
+        .route("/send/sol", post(send_sol))
+        .route("/send/token", post(send_token))
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
     let addr = format!("{}:{}", host, port);
-    log::info!("Server running on http://{}", addr);
+    log::info!("Solana API Server running on http://{}", addr);
     log::info!("Swagger UI available at http://{}/swagger-ui/", addr);
 
     // Start server
@@ -492,4 +509,4 @@ async fn main() {
         .expect("Failed to bind to address");
 
     axum::serve(listener, app).await.unwrap();
-}
+} 
