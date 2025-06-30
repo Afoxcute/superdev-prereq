@@ -104,7 +104,7 @@ pub struct SolTransferResponse {
     pub instruction_data: String,
 }
 
-// Token transfer response with different account format
+// Token transfer response with different account format (only pubkey and isSigner)
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TokenTransferResponse {
     pub program_id: String,
@@ -285,16 +285,16 @@ async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
 )]
 async fn create_token(
     Json(payload): Json<CreateTokenRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<InstructionResponse>>) {
     // Validate mint authority
     let mint_authority = match pubkey_from_str(&payload.mint_authority) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint authority public key format".to_string()),
-            })));
+            }));
         }
     };
 
@@ -302,21 +302,21 @@ async fn create_token(
     let mint = match pubkey_from_str(&payload.mint) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint public key format".to_string()),
-            })));
+            }));
         }
     };
 
     // Validate decimals (SPL tokens support 0-9 decimals typically)
     if payload.decimals > 9 {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some("Decimals must be between 0 and 9".to_string()),
-        })));
+        }));
     }
 
     // Create the initialize mint instruction
@@ -329,11 +329,11 @@ async fn create_token(
     ) {
         Ok(instruction) => instruction,
         Err(e) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some(format!("Failed to create mint instruction: {}", e)),
-            })));
+            }));
         }
     };
 
@@ -349,7 +349,7 @@ async fn create_token(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Ok(Json(ApiResponse {
+    (StatusCode::OK, Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
@@ -367,37 +367,37 @@ async fn create_token(
 )]
 async fn mint_token(
     Json(payload): Json<MintTokenRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<InstructionResponse>>) {
     let mint = match pubkey_from_str(&payload.mint) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint public key format".to_string()),
-            })));
+            }));
         }
     };
     
     let destination = match pubkey_from_str(&payload.destination) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid destination public key format".to_string()),
-            })));
+            }));
         }
     };
     
     let authority = match pubkey_from_str(&payload.authority) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid authority public key format".to_string()),
-            })));
+            }));
         }
     };
 
@@ -411,11 +411,11 @@ async fn mint_token(
     ) {
         Ok(instruction) => instruction,
         Err(e) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some(format!("Failed to create mint instruction: {}", e)),
-            })));
+            }));
         }
     };
 
@@ -430,7 +430,7 @@ async fn mint_token(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Ok(Json(ApiResponse {
+    (StatusCode::OK, Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
@@ -448,14 +448,14 @@ async fn mint_token(
 )]
 async fn sign_message(
     Json(payload): Json<SignMessageRequest>,
-) -> Result<Json<ApiResponse<SignatureResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<SignatureResponse>>) {
     // Validate required fields
     if let Err(e) = validate_required_fields_sign_message(&payload) {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })));
+        }));
     }
 
     match keypair_from_secret(&payload.secret) {
@@ -469,17 +469,17 @@ async fn sign_message(
                 message: payload.message,
             };
             
-            Ok(Json(ApiResponse {
+            (StatusCode::OK, Json(ApiResponse {
                 success: true,
                 data: Some(response),
                 error: None,
             }))
         }
-        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })))
+        }))
     }
 }
 
@@ -494,14 +494,14 @@ async fn sign_message(
 )]
 async fn verify_message(
     Json(payload): Json<VerifyMessageRequest>,
-) -> Result<Json<ApiResponse<VerificationResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<VerificationResponse>>) {
     // Validate required fields
     if let Err(e) = validate_required_fields_verify_message(&payload) {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })));
+        }));
     }
 
     let result = (|| -> Result<bool, String> {
@@ -529,17 +529,17 @@ async fn verify_message(
                 pubkey: payload.pubkey,
             };
             
-            Ok(Json(ApiResponse {
+            (StatusCode::OK, Json(ApiResponse {
                 success: true,
                 data: Some(response),
                 error: None,
             }))
         }
-        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        Err(e) => (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })))
+        }))
     }
 }
 
@@ -554,35 +554,35 @@ async fn verify_message(
 )]
 async fn send_sol(
     Json(payload): Json<SendSolRequest>,
-) -> Result<Json<ApiResponse<SolTransferResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<SolTransferResponse>>) {
     // Validate inputs
     if let Err(e) = validate_sol_transfer_inputs(&payload) {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })));
+        }));
     }
 
     let from = match pubkey_from_str(&payload.from) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid from address format".to_string()),
-            })));
+            }));
         }
     };
     
     let to = match pubkey_from_str(&payload.to) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid to address format".to_string()),
-            })));
+            }));
         }
     };
 
@@ -600,7 +600,7 @@ async fn send_sol(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Ok(Json(ApiResponse {
+    (StatusCode::OK, Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
@@ -618,46 +618,46 @@ async fn send_sol(
 )]
 async fn send_token(
     Json(payload): Json<SendTokenRequest>,
-) -> Result<Json<ApiResponse<TokenTransferResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+) -> (StatusCode, Json<ApiResponse<TokenTransferResponse>>) {
     // Validate inputs
     if let Err(e) = validate_token_transfer_inputs(&payload) {
-        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })));
+        }));
     }
 
     let mint = match pubkey_from_str(&payload.mint) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint address format".to_string()),
-            })));
+            }));
         }
     };
     
     let owner = match pubkey_from_str(&payload.owner) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid owner address format".to_string()),
-            })));
+            }));
         }
     };
     
     let destination = match pubkey_from_str(&payload.destination) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid destination address format".to_string()),
-            })));
+            }));
         }
     };
 
@@ -675,15 +675,15 @@ async fn send_token(
     ) {
         Ok(instruction) => instruction,
         Err(e) => {
-            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some(format!("Failed to create transfer instruction: {}", e)),
-            })));
+            }));
         }
     };
 
-    // Convert accounts to token transfer format (with isSigner field)
+    // Convert accounts to token transfer format (with isSigner field only)
     let accounts: Vec<TokenTransferAccountInfo> = instruction.accounts
         .iter()
         .map(account_meta_to_token_info)
@@ -695,7 +695,7 @@ async fn send_token(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Ok(Json(ApiResponse {
+    (StatusCode::OK, Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
