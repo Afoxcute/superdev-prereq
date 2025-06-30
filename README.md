@@ -12,7 +12,7 @@ A Rust-based HTTP server providing Solana blockchain operations through RESTful 
 - Create SPL token transfer instructions
 - Interactive Swagger UI documentation
 
-## Quick Start
+## Quick Start now
 
 ### Prerequisites
 
