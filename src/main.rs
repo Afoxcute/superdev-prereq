@@ -489,7 +489,7 @@ async fn main() {
     // Build the router with Swagger UI
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .route("/keypair", post(generate_keypair))
+        .route("keypair", post(generate_keypair))
         .route("/token/create", post(create_token))
         .route("/token/mint", post(mint_token))
         .route("/message/sign", post(sign_message))
@@ -509,4 +509,4 @@ async fn main() {
         .expect("Failed to bind to address");
 
     axum::serve(listener, app).await.unwrap();
-} 
+}
