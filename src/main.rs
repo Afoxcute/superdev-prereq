@@ -42,13 +42,16 @@ use base64::Engine;
         InstructionResponse,
         AccountInfo,
         SignatureResponse,
-        VerificationResponse
+        VerificationResponse,
+        SolTransferResponse,
+        TokenTransferResponse,
+        TokenTransferAccountInfo
     )),
     tags((name = "Solana API", description = "Solana blockchain operations"))
 )]
 struct ApiDoc;
 
-// Response structures
+// Base response structures
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiResponse<T> {
     pub success: bool,
@@ -58,6 +61,7 @@ pub struct ApiResponse<T> {
     pub error: Option<String>,
 }
 
+// Specific response data structures
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeypairResponse {
     pub pubkey: String,
@@ -90,6 +94,29 @@ pub struct VerificationResponse {
     pub valid: bool,
     pub message: String,
     pub pubkey: String,
+}
+
+// SOL transfer response with simplified accounts format
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SolTransferResponse {
+    pub program_id: String,
+    pub accounts: Vec<String>,
+    pub instruction_data: String,
+}
+
+// Token transfer response with different account format
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TokenTransferResponse {
+    pub program_id: String,
+    pub accounts: Vec<TokenTransferAccountInfo>,
+    pub instruction_data: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TokenTransferAccountInfo {
+    pub pubkey: String,
+    #[serde(rename = "isSigner")]
+    pub is_signer: bool,
 }
 
 // Request structures
@@ -137,7 +164,7 @@ pub struct SendTokenRequest {
     pub amount: u64,
 }
 
-// Application state (minimal for this implementation)
+// Application state
 #[derive(Clone)]
 pub struct AppState;
 
@@ -174,6 +201,57 @@ fn account_meta_to_info(account: &AccountMeta) -> AccountInfo {
     }
 }
 
+fn account_meta_to_token_info(account: &AccountMeta) -> TokenTransferAccountInfo {
+    TokenTransferAccountInfo {
+        pubkey: account.pubkey.to_string(),
+        is_signer: account.is_signer,
+    }
+}
+
+// Validation functions
+fn validate_required_fields_sign_message(payload: &SignMessageRequest) -> Result<(), String> {
+    if payload.message.trim().is_empty() || payload.secret.trim().is_empty() {
+        return Err("Missing required fields".to_string());
+    }
+    Ok(())
+}
+
+fn validate_required_fields_verify_message(payload: &VerifyMessageRequest) -> Result<(), String> {
+    if payload.message.trim().is_empty() || payload.signature.trim().is_empty() || payload.pubkey.trim().is_empty() {
+        return Err("Missing required fields".to_string());
+    }
+    Ok(())
+}
+
+fn validate_sol_transfer_inputs(payload: &SendSolRequest) -> Result<(), String> {
+    if payload.from.trim().is_empty() || payload.to.trim().is_empty() {
+        return Err("Invalid addresses provided".to_string());
+    }
+    
+    if payload.lamports == 0 {
+        return Err("Amount must be greater than 0".to_string());
+    }
+    
+    // Validate that from and to are different
+    if payload.from == payload.to {
+        return Err("Cannot send SOL to the same address".to_string());
+    }
+    
+    Ok(())
+}
+
+fn validate_token_transfer_inputs(payload: &SendTokenRequest) -> Result<(), String> {
+    if payload.destination.trim().is_empty() || payload.mint.trim().is_empty() || payload.owner.trim().is_empty() {
+        return Err("Invalid addresses provided".to_string());
+    }
+    
+    if payload.amount == 0 {
+        return Err("Amount must be greater than 0".to_string());
+    }
+    
+    Ok(())
+}
+
 // Endpoint handlers
 #[utoipa::path(
     post,
@@ -207,16 +285,16 @@ async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
 )]
 async fn create_token(
     Json(payload): Json<CreateTokenRequest>,
-) -> Json<ApiResponse<InstructionResponse>> {
+) -> Result<Json<ApiResponse<InstructionResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
     // Validate mint authority
     let mint_authority = match pubkey_from_str(&payload.mint_authority) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Json(ApiResponse {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint authority public key format".to_string()),
-            });
+            })));
         }
     };
 
@@ -224,21 +302,21 @@ async fn create_token(
     let mint = match pubkey_from_str(&payload.mint) {
         Ok(pubkey) => pubkey,
         Err(_) => {
-            return Json(ApiResponse {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some("Invalid mint public key format".to_string()),
-            });
+            })));
         }
     };
 
     // Validate decimals (SPL tokens support 0-9 decimals typically)
     if payload.decimals > 9 {
-        return Json(ApiResponse {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some("Decimals must be between 0 and 9".to_string()),
-        });
+        })));
     }
 
     // Create the initialize mint instruction
@@ -251,11 +329,11 @@ async fn create_token(
     ) {
         Ok(instruction) => instruction,
         Err(e) => {
-            return Json(ApiResponse {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
                 success: false,
                 data: None,
                 error: Some(format!("Failed to create mint instruction: {}", e)),
-            });
+            })));
         }
     };
 
@@ -271,11 +349,11 @@ async fn create_token(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Json(ApiResponse {
+    Ok(Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
-    })
+    }))
 }
 
 #[utoipa::path(
@@ -289,22 +367,57 @@ async fn create_token(
 )]
 async fn mint_token(
     Json(payload): Json<MintTokenRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
-    let mint = pubkey_from_str(&payload.mint)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let destination = pubkey_from_str(&payload.destination)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let authority = pubkey_from_str(&payload.authority)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Result<Json<ApiResponse<InstructionResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+    let mint = match pubkey_from_str(&payload.mint) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid mint public key format".to_string()),
+            })));
+        }
+    };
+    
+    let destination = match pubkey_from_str(&payload.destination) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid destination public key format".to_string()),
+            })));
+        }
+    };
+    
+    let authority = match pubkey_from_str(&payload.authority) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid authority public key format".to_string()),
+            })));
+        }
+    };
 
-    let instruction = mint_to(
+    let instruction = match mint_to(
         &spl_token::id(),
         &mint,
         &destination,
         &authority,
         &[],
         payload.amount,
-    ).map_err(|_| StatusCode::BAD_REQUEST)?;
+    ) {
+        Ok(instruction) => instruction,
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to create mint instruction: {}", e)),
+            })));
+        }
+    };
 
     let accounts: Vec<AccountInfo> = instruction.accounts
         .iter()
@@ -335,7 +448,16 @@ async fn mint_token(
 )]
 async fn sign_message(
     Json(payload): Json<SignMessageRequest>,
-) -> Json<ApiResponse<SignatureResponse>> {
+) -> Result<Json<ApiResponse<SignatureResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+    // Validate required fields
+    if let Err(e) = validate_required_fields_sign_message(&payload) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })));
+    }
+
     match keypair_from_secret(&payload.secret) {
         Ok(keypair) => {
             let message_bytes = payload.message.as_bytes();
@@ -347,17 +469,17 @@ async fn sign_message(
                 message: payload.message,
             };
             
-            Json(ApiResponse {
+            Ok(Json(ApiResponse {
                 success: true,
                 data: Some(response),
                 error: None,
-            })
+            }))
         }
-        Err(e) => Json(ApiResponse {
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })
+        })))
     }
 }
 
@@ -372,7 +494,16 @@ async fn sign_message(
 )]
 async fn verify_message(
     Json(payload): Json<VerifyMessageRequest>,
-) -> Json<ApiResponse<VerificationResponse>> {
+) -> Result<Json<ApiResponse<VerificationResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+    // Validate required fields
+    if let Err(e) = validate_required_fields_verify_message(&payload) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })));
+    }
+
     let result = (|| -> Result<bool, String> {
         let pubkey = pubkey_from_str(&payload.pubkey)?;
         let signature_bytes = base64::engine::general_purpose::STANDARD
@@ -398,17 +529,17 @@ async fn verify_message(
                 pubkey: payload.pubkey,
             };
             
-            Json(ApiResponse {
+            Ok(Json(ApiResponse {
                 success: true,
                 data: Some(response),
                 error: None,
-            })
+            }))
         }
-        Err(e) => Json(ApiResponse {
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
             success: false,
             data: None,
             error: Some(e),
-        })
+        })))
     }
 }
 
@@ -417,30 +548,53 @@ async fn verify_message(
     path = "/send/sol",
     request_body = SendSolRequest,
     responses(
-        (status = 200, description = "SOL transfer instruction", body = ApiResponse<InstructionResponse>),
+        (status = 200, description = "SOL transfer instruction", body = ApiResponse<SolTransferResponse>),
         (status = 400, description = "Invalid request", body = ApiResponse<String>)
     )
 )]
 async fn send_sol(
     Json(payload): Json<SendSolRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
-    let from = pubkey_from_str(&payload.from)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let to = pubkey_from_str(&payload.to)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    if payload.lamports == 0 {
-        return Err(StatusCode::BAD_REQUEST);
+) -> Result<Json<ApiResponse<SolTransferResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+    // Validate inputs
+    if let Err(e) = validate_sol_transfer_inputs(&payload) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })));
     }
+
+    let from = match pubkey_from_str(&payload.from) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid from address format".to_string()),
+            })));
+        }
+    };
+    
+    let to = match pubkey_from_str(&payload.to) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid to address format".to_string()),
+            })));
+        }
+    };
 
     let instruction = system_instruction::transfer(&from, &to, payload.lamports);
 
-    let accounts: Vec<AccountInfo> = instruction.accounts
+    // Convert accounts to simplified string format as per specification
+    let accounts: Vec<String> = instruction.accounts
         .iter()
-        .map(account_meta_to_info)
+        .map(|account| account.pubkey.to_string())
         .collect();
 
-    let response = InstructionResponse {
+    let response = SolTransferResponse {
         program_id: instruction.program_id.to_string(),
         accounts,
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
@@ -458,43 +612,84 @@ async fn send_sol(
     path = "/send/token",
     request_body = SendTokenRequest,
     responses(
-        (status = 200, description = "Token transfer instruction", body = ApiResponse<InstructionResponse>),
+        (status = 200, description = "Token transfer instruction", body = ApiResponse<TokenTransferResponse>),
         (status = 400, description = "Invalid request", body = ApiResponse<String>)
     )
 )]
 async fn send_token(
     Json(payload): Json<SendTokenRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
-    let mint = pubkey_from_str(&payload.mint)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let owner = pubkey_from_str(&payload.owner)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let destination = pubkey_from_str(&payload.destination)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    if payload.amount == 0 {
-        return Err(StatusCode::BAD_REQUEST);
+) -> Result<Json<ApiResponse<TokenTransferResponse>>, (StatusCode, Json<ApiResponse<String>>)> {
+    // Validate inputs
+    if let Err(e) = validate_token_transfer_inputs(&payload) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e),
+        })));
     }
+
+    let mint = match pubkey_from_str(&payload.mint) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid mint address format".to_string()),
+            })));
+        }
+    };
+    
+    let owner = match pubkey_from_str(&payload.owner) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid owner address format".to_string()),
+            })));
+        }
+    };
+    
+    let destination = match pubkey_from_str(&payload.destination) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid destination address format".to_string()),
+            })));
+        }
+    };
 
     // Get associated token accounts
     let source_ata = spl_associated_token_account::get_associated_token_address(&owner, &mint);
     let dest_ata = spl_associated_token_account::get_associated_token_address(&destination, &mint);
 
-    let instruction = transfer(
+    let instruction = match transfer(
         &spl_token::id(),
         &source_ata,
         &dest_ata,
         &owner,
         &[],
         payload.amount,
-    ).map_err(|_| StatusCode::BAD_REQUEST)?;
+    ) {
+        Ok(instruction) => instruction,
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to create transfer instruction: {}", e)),
+            })));
+        }
+    };
 
-    let accounts: Vec<AccountInfo> = instruction.accounts
+    // Convert accounts to token transfer format (with isSigner field)
+    let accounts: Vec<TokenTransferAccountInfo> = instruction.accounts
         .iter()
-        .map(account_meta_to_info)
+        .map(account_meta_to_token_info)
         .collect();
 
-    let response = InstructionResponse {
+    let response = TokenTransferResponse {
         program_id: instruction.program_id.to_string(),
         accounts,
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
