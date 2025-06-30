@@ -45,7 +45,14 @@ use base64::Engine;
         VerificationResponse,
         SolTransferResponse,
         TokenTransferResponse,
-        TokenTransferAccountInfo
+        TokenTransferAccountInfo,
+        KeypairApiResponse,
+        InstructionApiResponse,
+        SignatureApiResponse,
+        VerificationApiResponse,
+        SolTransferApiResponse,
+        TokenTransferApiResponse,
+        ErrorApiResponse
     )),
     tags((name = "Solana API", description = "Solana blockchain operations"))
 )]
@@ -57,6 +64,70 @@ pub struct ApiResponse<T> {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// Specific response wrapper types for OpenAPI
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeypairApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<KeypairResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstructionApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<InstructionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SignatureApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<SignatureResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerificationApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<VerificationResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SolTransferApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<SolTransferResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TokenTransferApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<TokenTransferResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorApiResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -257,7 +328,7 @@ fn validate_token_transfer_inputs(payload: &SendTokenRequest) -> Result<(), Stri
     post,
     path = "/keypair",
     responses(
-        (status = 200, description = "Keypair generated successfully", body = ApiResponse<KeypairResponse>)
+        (status = 200, description = "Keypair generated successfully", body = KeypairApiResponse)
     )
 )]
 async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
@@ -279,8 +350,8 @@ async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
     path = "/token/create",
     request_body = CreateTokenRequest,
     responses(
-        (status = 200, description = "Token creation instruction", body = ApiResponse<InstructionResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "Token creation instruction", body = InstructionApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn create_token(
@@ -361,8 +432,8 @@ async fn create_token(
     path = "/token/mint",
     request_body = MintTokenRequest,
     responses(
-        (status = 200, description = "Token mint instruction", body = ApiResponse<InstructionResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "Token mint instruction", body = InstructionApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn mint_token(
@@ -442,8 +513,8 @@ async fn mint_token(
     path = "/message/sign",
     request_body = SignMessageRequest,
     responses(
-        (status = 200, description = "Message signed successfully", body = ApiResponse<SignatureResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "Message signed successfully", body = SignatureApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn sign_message(
@@ -488,8 +559,8 @@ async fn sign_message(
     path = "/message/verify",
     request_body = VerifyMessageRequest,
     responses(
-        (status = 200, description = "Message verification result", body = ApiResponse<VerificationResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "Message verification result", body = VerificationApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn verify_message(
@@ -548,8 +619,8 @@ async fn verify_message(
     path = "/send/sol",
     request_body = SendSolRequest,
     responses(
-        (status = 200, description = "SOL transfer instruction", body = ApiResponse<SolTransferResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "SOL transfer instruction", body = SolTransferApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn send_sol(
@@ -612,8 +683,8 @@ async fn send_sol(
     path = "/send/token",
     request_body = SendTokenRequest,
     responses(
-        (status = 200, description = "Token transfer instruction", body = ApiResponse<TokenTransferResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 200, description = "Token transfer instruction", body = TokenTransferApiResponse),
+        (status = 400, description = "Invalid request", body = ErrorApiResponse)
     )
 )]
 async fn send_token(
