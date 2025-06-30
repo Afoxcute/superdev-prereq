@@ -207,20 +207,59 @@ async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
 )]
 async fn create_token(
     Json(payload): Json<CreateTokenRequest>,
-) -> Result<Json<ApiResponse<InstructionResponse>>, StatusCode> {
-    let mint_authority = pubkey_from_str(&payload.mint_authority)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let mint = pubkey_from_str(&payload.mint)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+) -> Json<ApiResponse<InstructionResponse>> {
+    // Validate mint authority
+    let mint_authority = match pubkey_from_str(&payload.mint_authority) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid mint authority public key format".to_string()),
+            });
+        }
+    };
 
-    let instruction = initialize_mint(
+    // Validate mint address
+    let mint = match pubkey_from_str(&payload.mint) {
+        Ok(pubkey) => pubkey,
+        Err(_) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some("Invalid mint public key format".to_string()),
+            });
+        }
+    };
+
+    // Validate decimals (SPL tokens support 0-9 decimals typically)
+    if payload.decimals > 9 {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Decimals must be between 0 and 9".to_string()),
+        });
+    }
+
+    // Create the initialize mint instruction
+    let instruction = match initialize_mint(
         &spl_token::id(),
         &mint,
         &mint_authority,
-        Some(&mint_authority),
+        Some(&mint_authority), // Using mint_authority as freeze_authority too
         payload.decimals,
-    ).map_err(|_| StatusCode::BAD_REQUEST)?;
+    ) {
+        Ok(instruction) => instruction,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to create mint instruction: {}", e)),
+            });
+        }
+    };
 
+    // Convert accounts to our response format
     let accounts: Vec<AccountInfo> = instruction.accounts
         .iter()
         .map(account_meta_to_info)
@@ -232,11 +271,11 @@ async fn create_token(
         instruction_data: base64::engine::general_purpose::STANDARD.encode(&instruction.data),
     };
 
-    Ok(Json(ApiResponse {
+    Json(ApiResponse {
         success: true,
         data: Some(response),
         error: None,
-    }))
+    })
 }
 
 #[utoipa::path(
