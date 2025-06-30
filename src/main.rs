@@ -280,7 +280,7 @@ async fn generate_keypair() -> Json<ApiResponse<KeypairResponse>> {
     request_body = CreateTokenRequest,
     responses(
         (status = 200, description = "Token creation instruction", body = ApiResponse<InstructionResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<InstructionResponse>)
     )
 )]
 async fn create_token(
@@ -362,7 +362,7 @@ async fn create_token(
     request_body = MintTokenRequest,
     responses(
         (status = 200, description = "Token mint instruction", body = ApiResponse<InstructionResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<InstructionResponse>)
     )
 )]
 async fn mint_token(
@@ -443,7 +443,7 @@ async fn mint_token(
     request_body = SignMessageRequest,
     responses(
         (status = 200, description = "Message signed successfully", body = ApiResponse<SignatureResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<SignatureResponse>)
     )
 )]
 async fn sign_message(
@@ -489,7 +489,7 @@ async fn sign_message(
     request_body = VerifyMessageRequest,
     responses(
         (status = 200, description = "Message verification result", body = ApiResponse<VerificationResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<VerificationResponse>)
     )
 )]
 async fn verify_message(
@@ -549,7 +549,7 @@ async fn verify_message(
     request_body = SendSolRequest,
     responses(
         (status = 200, description = "SOL transfer instruction", body = ApiResponse<SolTransferResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<SolTransferResponse>)
     )
 )]
 async fn send_sol(
@@ -613,7 +613,7 @@ async fn send_sol(
     request_body = SendTokenRequest,
     responses(
         (status = 200, description = "Token transfer instruction", body = ApiResponse<TokenTransferResponse>),
-        (status = 400, description = "Invalid request", body = ApiResponse<String>)
+        (status = 400, description = "Invalid request", body = ApiResponse<TokenTransferResponse>)
     )
 )]
 async fn send_token(
